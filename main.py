@@ -1,8 +1,8 @@
 '''
 Script for publishing control messages to a
-RabbitMQ Pipeline
+Data Pipeline using RabbitMQ as the message broker.
 
-Tech: 
+Tech-Stack: 
 GUI: PySimpleGUi
  https://www.pysimplegui.org/en/latest/
 
@@ -12,19 +12,13 @@ Backend: pika
 '''
 
 import PySimpleGUI as sg
-import sys
 import json
 import pika
 
-# sets theme, to see a list of all possible themes use the following command: print(sg.theme_list)
 sg.theme('SystemDefault')
-# sets font and font size
 sg.set_options(font="Franklin 12")
 
-# default routing_key = control
-routing_key = ""
-
-# creates window and allows user to publish control messages to RabbitMQ
+routing_key = "test"
 
 def main():
     commands = ["shutdown", "suspend", "resume", "mute", "unmute", "loglevel",
@@ -32,7 +26,6 @@ def main():
 
     at_commands = ["shutdown", "suspend", "resume", "mute", "unmute"]
 
-    # txtColumn and inpColumn are the layout for the window
     inpFieldSize = (30, 9)
     txtColumn = sg.Column([
         [sg.Text('Host')],
@@ -49,13 +42,11 @@ def main():
     ], expand_y=True)
 
     inpColumn = sg.Column([
-        [sg.InputText(size=inpFieldSize, key="HOST",
-                      default_text="localhost")],
-        [sg.InputText(size=inpFieldSize, key="PORT", default_text="")],
+        [sg.InputText(size=inpFieldSize, key="HOST", default_text="localhost")],
+        [sg.InputText(size=inpFieldSize, key="PORT", default_text="5672")],
         [sg.InputText(size=inpFieldSize)],
         [sg.InputText(size=inpFieldSize)],
-        [sg.InputText(size=inpFieldSize, key="EXCH",
-                      default_text="amq.direct")],
+        [sg.InputText(size=inpFieldSize, key="EXCH", default_text="amq.direct")],
         [sg.Button("CONNECT", size=(30, 1))],
         [sg.Button("DISCONNECT", size=(30, 1), disabled=True)],
         [sg.InputText(size=inpFieldSize, key="recipients")],
@@ -65,29 +56,39 @@ def main():
         [sg.Button("PUBLISH", size=(30, 1), key="PUBLISH", disabled=True)]
     ], expand_y=True)
 
-    # opens window and checks for events
-    window = sg.Window('RabbitMQcontrol', [
-                       [txtColumn, inpColumn]])  # titel und layout
+    window = sg.Window('RabbitMQcontrol', [[txtColumn, inpColumn]])
     connection = None
     channel = None
+    
     while True:
-        # following if statements all check for events
         event, values = window.read()
-        if event == "Exit" or event == sg.WIN_CLOSED:  # if user closes window or clicks cancel
-            window.close()
+        
+        if event == "Exit" or event == sg.WIN_CLOSED:
+            break
 
         if event == "CONNECT":
-            window['CONNECT'].update(disabled=True)
-            window['DISCONNECT'].update(disabled=False)
-
-            window['PUBLISH'].update(disabled=False)
-
-            # connection to the RabbitMQ Host
-            connection = pika.BlockingConnection(
-                pika.ConnectionParameters(host=values["HOST"], port=values["PORT"]))
-
-            channel = connection.channel()
-            print("Channel is open: ", channel.is_open)
+            try:
+                # Convert port to integer
+                port = int(values["PORT"]) if values["PORT"] else 5672
+                
+                connection = pika.BlockingConnection(
+                    pika.ConnectionParameters(host=values["HOST"], port=port))
+                channel = connection.channel()
+                
+                # Declare the queue and bind it to the exchange
+                channel.queue_declare(queue=routing_key)
+                channel.queue_bind(exchange=values["EXCH"], 
+                                 queue=routing_key,
+                                 routing_key=routing_key)
+                
+                print("Channel is open:", channel.is_open)
+                window['CONNECT'].update(disabled=True)
+                window['DISCONNECT'].update(disabled=False)
+                window['PUBLISH'].update(disabled=False)
+                
+            except Exception as e:
+                sg.popup_error(f'Connection error: {str(e)}')
+                continue
 
         if event == "DISCONNECT":
             window['CONNECT'].update(disabled=False)
@@ -98,43 +99,38 @@ def main():
                 connection.close()
                 print("Connection closed")
 
-        if event == "Exit" or event == sg.WIN_CLOSED:
-            window.close()
-            break
-
         if event == "PUBLISH":
-            # json format handling by changing the values of the keys in the dict values
-            values["recipients"] = values["recipients"].split(",")
+            try:
+                values["recipients"] = values["recipients"].split(",")
 
-            if values["command"] in at_commands:
-                values["arguments"] = {"at": values["arguments"]}
+                if values["command"] in at_commands:
+                    values["arguments"] = {"at": values["arguments"]}
+                elif values["command"] == "start_mountpoint" or values["command"] == "stop_mountpoint":
+                    values["arguments"] = {"mountpoint": values["arguments"]}
+                elif values["command"] == "loglevel":
+                    values["arguments"] = {"level": values["arguments"]}
 
-            elif values["command"] == "start_mountpoint" or values["command"] == "stop_mountpoint":
-                values["arguments"] = {"mountpoint": values["arguments"]}
+                v = dict(list(values.items())[5:])
+                jsonData = json.dumps(v)
+                
+                if channel and channel.is_open:
+                    channel.basic_publish(
+                        exchange=values["EXCH"],
+                        routing_key=routing_key,
+                        body=jsonData)
+                    print(" [x] Sent json:", jsonData)
+                else:
+                    sg.popup_error("No active channel. Please connect first.")
+            
+            except Exception as e:
+                sg.popup_error(f'Publishing error: {str(e)}')
 
-            elif values["command"] == "loglevel":
-                values["arguments"] = {"level": values["arguments"]}
-
-            v = dict(list(values.items())[5:])
-
-            jsonData = json.dumps(v)
-            if channel:
-                channel.basic_publish(
-                    exchange=values["EXCH"], routing_key=routing_key, body=jsonData)
-                print(" [x] Sent json")
-
-            else:
-                print("No channel was opened")
-
-    # makes sure channel/connection is open before closing
-    if channel is not None:
+    window.close()
+    
+    if channel is not None and channel.is_open:
         channel.close()
-
-    if connection is not None:
+    if connection is not None and connection.is_open:
         connection.close()
-
-    sys.exit()
-
 
 if __name__ == "__main__":
     main()
